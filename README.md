@@ -5,9 +5,6 @@ Repositório criado para desenvolvimento do projeto da cadeira de Inteligencia A
 
 Requisitos (veja `requirements.txt`): numpy e pygame.
 
-Modo "game" (visualização em tempo real com Pygame) — OBS: o modo texto/matplotlib foi removido;
-o programa roda exclusivamente com a interface tipo jogo.
-
 1. Instale dependências:
 
 ```powershell
