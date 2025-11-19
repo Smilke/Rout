@@ -394,8 +394,8 @@ class GeneticAlgorithm:
 
 if __name__ == "__main__":
 	# pequeno teste rápido
-	ga = GeneticAlgorithm(population_size=40, mutation_rate=0.15, crossover_rate=0.9, seed=42)
-	best, fit = ga.run(generations=60)
+	ga = GeneticAlgorithm(population_size=50, mutation_rate=0.1, crossover_rate=0.9)
+	best, fit = ga.run(generations=90)
 	print("Best fitness:", fit)
 	print(best)
 
