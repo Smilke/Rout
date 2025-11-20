@@ -11,6 +11,7 @@ experimentos educacionais.
 from dataclasses import dataclass
 import math
 from typing import List, Tuple, Optional
+import heapq
 
 import numpy as np
 
@@ -19,7 +20,7 @@ from numpy.random import default_rng
 
 
 # NN architecture constants (fixed)
-SENSOR_COUNT = 3
+SENSOR_COUNT = 7
 NN_INPUT = SENSOR_COUNT + 1
 NN_HIDDEN = 6
 NN_OUTPUT = 4
@@ -35,7 +36,6 @@ class CarGenome:
 	drag: float          # coeficiente de arrasto (0..2)
 	grip: float          # coeficiente de aderência (0.5..2.0)
 	steering: float      # capacidade de virar (0..1)
-	sensor_range: float  # alcance dos sensores (m)
 	# rede neural (pesos flatten)
 	nn_weights: np.ndarray
 
@@ -47,14 +47,13 @@ class CarGenome:
 			self.drag,
 			self.grip,
 			self.steering,
-			self.sensor_range,
 		], dtype=float)
 		return np.concatenate([phys, self.nn_weights.astype(float)])
 
 	@staticmethod
 	def from_vector(v: np.ndarray, nn_weights_size: int) -> "CarGenome":
-		phys = v[:7]
-		weights = v[7:7+nn_weights_size]
+		phys = v[:6]
+		weights = v[6:6+nn_weights_size]
 		return CarGenome(
 			wheel_radius=float(phys[0]),
 			motor_power=float(phys[1]),
@@ -62,7 +61,6 @@ class CarGenome:
 			drag=float(phys[3]),
 			grip=float(phys[4]),
 			steering=float(phys[5]),
-			sensor_range=float(phys[6]),
 			nn_weights=weights.copy(),
 		)
 
@@ -75,7 +73,6 @@ _phys_bounds = np.array([
 	[0.0, 2.0],      # drag
 	[0.5, 2.0],      # grip
 	[0.0, 1.0],      # steering
-	[5.0, 60.0],     # sensor_range (m)
 ])
 
 # weight bounds for NN parameters
@@ -98,7 +95,7 @@ def simulate_car(genome: CarGenome,
 				 goal_x: float = 100.0,
 				 obstacles: Optional[List[Tuple[float, float, float]]] = None,
 				 dt: float = 0.1,
-				 max_steps: int = 1000,
+				 max_steps: int = 10000,
 				 env_bounds: Tuple[float, float] = (-25.0, 25.0)) -> Tuple[float, bool, List[Tuple[float, float]]]:
 	"""
 	Simula o carro começando em (0,0) com orientação 0 (eixo +x). O objetivo
@@ -125,8 +122,10 @@ def simulate_car(genome: CarGenome,
 	fuel_mass_coeff = 0.2
 	mass = mass_base + motor_mass_coeff * genome.motor_power + fuel_mass_coeff * genome.fuel_tank
 
-	# sensores fixos (em relação ao heading): esquerda, centro, direita
-	sensor_angles = [-math.pi / 6, 0.0, math.pi / 6]
+	# sensores fixos (em relação ao heading): gerar N sensores com o central em 0
+	# espalha por uma faixa simétrica; um sensor fica exatamente em 0
+	span = math.pi / 3.0  # +/- 60 degrees total span
+	sensor_angles = list(np.linspace(-span, span, SENSOR_COUNT))
 
 	# loop principal da simulação: cada iteração representa dt segundos
 	for step in range(max_steps):
@@ -141,8 +140,7 @@ def simulate_car(genome: CarGenome,
 		sensor_readings = []
 		for sa in sensor_angles:
 			ray_angle = heading + sa
-			sr = genome.sensor_range
-			min_dist = sr
+			min_dist = float('inf')
 			# checar paredes (env_bounds)
 			if abs(math.sin(ray_angle)) > 1e-8:
 				if math.sin(ray_angle) > 0:
@@ -246,8 +244,9 @@ def simulate_car(genome: CarGenome,
 						continue
 			sensor_readings.append(min_dist)
 
-		# normalize sensor readings to [0,1]
-		sens_norm = np.minimum(1.0, np.array(sensor_readings, dtype=float) / float(genome.sensor_range))
+		# normalize sensor readings to (0,1] using a monotonic transform
+		# sensors are "unlimited"; use 1/(1+dist) so near obstacles -> ~1, far -> ~0
+		sens_norm = 1.0 / (1.0 + np.array(sensor_readings, dtype=float))
 		speed_norm = float(min(1.0, abs(v) / 20.0))
 
 		# use NN to decide actions (genome must carry nn_weights attribute)
@@ -357,6 +356,138 @@ def fitness_of(genome: CarGenome, goal_x: float = 100.0, obstacles=None) -> floa
 	return float(fitness)
 
 
+def _point_to_segment_distance(px: float, py: float, x1: float, y1: float, x2: float, y2: float) -> float:
+	dx = x2 - x1
+	dy = y2 - y1
+	if dx == 0 and dy == 0:
+		return math.hypot(px - x1, py - y1)
+	t = ((px - x1) * dx + (py - y1) * dy) / (dx * dx + dy * dy)
+	t = max(0.0, min(1.0, t))
+	projx = x1 + t * dx
+	projy = y1 + t * dy
+	return math.hypot(px - projx, py - projy)
+
+
+def compute_potential_field(obstacles,
+							goal_pos: Tuple[float, float],
+							x_min: float = -10.0,
+							x_max: float = 110.0,
+							y_min: float = -25.0,
+							y_max: float = 25.0,
+							resolution: float = 0.5) -> dict:
+	"""Compute a cost-to-go grid (Dijkstra) propagated from `goal_pos`.
+
+	Returns a dict with keys: 'grid' (2D numpy array shape (nx, ny)), 'origin' (x_min,y_min),
+	'res' (resolution) and 'shape' (nx, ny).
+	Obstacles support circle tuples (x,y,r) and segment tuples ('seg', x1,y1,x2,y2,r).
+	"""
+	xs = np.arange(x_min + resolution / 2.0, x_max, resolution)
+	ys = np.arange(y_min + resolution / 2.0, y_max, resolution)
+	nx = xs.size
+	ny = ys.size
+	if nx <= 0 or ny <= 0:
+		return {'grid': np.full((0, 0), float('inf')), 'origin': (x_min, y_min), 'res': resolution, 'shape': (nx, ny)}
+
+	# create grid of cell centers with indexing 'ij' so grid[i,j] corresponds to xs[i], ys[j]
+	XX, YY = np.meshgrid(xs, ys, indexing='ij')
+	blocked = np.zeros((nx, ny), dtype=bool)
+
+	for o in (obstacles or []):
+		if isinstance(o, tuple) and len(o) == 3:
+			ox, oy, orad = o
+			d2 = (XX - ox) ** 2 + (YY - oy) ** 2
+			blocked |= (d2 <= (orad) ** 2)
+		elif isinstance(o, tuple) and len(o) == 6 and o[0] == 'seg':
+			_, x1, y1, x2, y2, orad = o
+			dx = x2 - x1
+			dy = y2 - y1
+			denom = dx * dx + dy * dy
+			if denom == 0:
+				d2 = (XX - x1) ** 2 + (YY - y1) ** 2
+			else:
+				t = ((XX - x1) * dx + (YY - y1) * dy) / denom
+				t = np.clip(t, 0.0, 1.0)
+				projx = x1 + t * dx
+				projy = y1 + t * dy
+				d2 = (XX - projx) ** 2 + (YY - projy) ** 2
+			blocked |= (d2 <= (orad) ** 2)
+		else:
+			try:
+				ox, oy, orad = o
+				d2 = (XX - ox) ** 2 + (YY - oy) ** 2
+				blocked |= (d2 <= (orad) ** 2)
+			except Exception:
+				continue
+
+	INF = float('inf')
+	pot = np.full((nx, ny), INF, dtype=float)
+
+	gx, gy = goal_pos
+	# map goal to nearest cell indices
+	ix = int(round((gx - (x_min + resolution / 2.0)) / resolution))
+	iy = int(round((gy - (y_min + resolution / 2.0)) / resolution))
+	if ix < 0 or ix >= nx or iy < 0 or iy >= ny or blocked[ix, iy]:
+		return {'grid': pot, 'origin': (x_min, y_min), 'res': resolution, 'shape': (nx, ny)}
+
+	pot[ix, iy] = 0.0
+	heap = [(0.0, ix, iy)]
+	neigh = [(-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (-1, 1), (1, -1), (1, 1)]
+	costs = {( -1, 0): resolution, (1, 0): resolution, (0, -1): resolution, (0, 1): resolution,
+			 (-1, -1): resolution * math.sqrt(2), (-1, 1): resolution * math.sqrt(2),
+			 (1, -1): resolution * math.sqrt(2), (1, 1): resolution * math.sqrt(2)}
+
+	while heap:
+		cost, ci, cj = heapq.heappop(heap)
+		if cost != pot[ci, cj]:
+			continue
+		for dx_cell, dy_cell in neigh:
+			ni = ci + dx_cell
+			nj = cj + dy_cell
+			if not (0 <= ni < nx and 0 <= nj < ny):
+				continue
+			if blocked[ni, nj]:
+				continue
+			step_cost = costs[(dx_cell, dy_cell)]
+			newc = cost + step_cost
+			if newc < pot[ni, nj]:
+				pot[ni, nj] = newc
+				heapq.heappush(heap, (newc, ni, nj))
+
+	return {'grid': pot, 'origin': (x_min, y_min), 'res': resolution, 'shape': (nx, ny)}
+
+
+def sample_potential(field: dict, x: float, y: float) -> float:
+	if field is None:
+		return float('inf')
+	grid = field['grid']
+	x0, y0 = field['origin']
+	res = field['res']
+	nx, ny = field['shape']
+	if nx == 0 or ny == 0:
+		return float('inf')
+	fx = (x - (x0 + res / 2.0)) / res
+	fy = (y - (y0 + res / 2.0)) / res
+	ix = int(math.floor(fx))
+	iy = int(math.floor(fy))
+	wx = fx - ix
+	wy = fy - iy
+	if ix < 0 or iy < 0 or ix + 1 >= nx or iy + 1 >= ny:
+		return float('inf')
+	v00 = grid[ix, iy]
+	v10 = grid[ix + 1, iy]
+	v01 = grid[ix, iy + 1]
+	v11 = grid[ix + 1, iy + 1]
+	if not np.isfinite(v00) and not np.isfinite(v10) and not np.isfinite(v01) and not np.isfinite(v11):
+		return float('inf')
+	BIG = 1e6
+	vals = [v00 if np.isfinite(v00) else BIG,
+			v10 if np.isfinite(v10) else BIG,
+			v01 if np.isfinite(v01) else BIG,
+			v11 if np.isfinite(v11) else BIG]
+	v = (vals[0] * (1 - wx) * (1 - wy) + vals[1] * wx * (1 - wy) + vals[2] * (1 - wx) * wy + vals[3] * wx * wy)
+	return float(v)
+
+
 class GeneticAlgorithm:
 	def __init__(self,
 				 population_size: int = 50,
@@ -379,6 +510,19 @@ class GeneticAlgorithm:
 		# population stored as numpy arrays
 		self.pop = self._init_population()
 
+		# precompute potential field to evaluate curved paths better
+		# bounds chosen to match typical world used by main.py; resolution configurable
+		try:
+			self.potential_field = compute_potential_field(self.obstacles,
+									(goal_x if False else (self.goal_x, 0.0)),
+								x_min=-10.0,
+								x_max=self.goal_x + 10.0,
+								y_min=-25.0,
+								y_max=25.0,
+								resolution=0.5)
+		except Exception:
+			self.potential_field = None
+
 	def _init_population(self) -> np.ndarray:
 		low = GENE_BOUNDS[:, 0]
 		high = GENE_BOUNDS[:, 1]
@@ -399,10 +543,19 @@ class GeneticAlgorithm:
 		for i in range(self.population_size):
 			genome = CarGenome.from_vector(self.pop[i], NN_WEIGHTS_SIZE)
 			x_reached, collision, traj = simulate_car(genome, goal_x=self.goal_x, obstacles=self.obstacles)
-			x_used = min(float(x_reached), float(self.goal_x))
 			steps = max(0, len(traj) - 1)
 			time_cost = 0.02
-			fitness[i] = x_used - (time_cost * steps)
+			# if a potential field is available, use it (lower cost == better)
+			if getattr(self, 'potential_field', None) is not None:
+				final_x, final_y = traj[-1]
+				pot = sample_potential(self.potential_field, final_x, final_y)
+				if not np.isfinite(pot):
+					fitness[i] = -1e3 - (time_cost * steps)
+				else:
+					fitness[i] = -pot - (time_cost * steps)
+			else:
+				x_used = min(float(x_reached), float(self.goal_x))
+				fitness[i] = x_used - (time_cost * steps)
 			if collision:
 				fitness[i] -= COLLISION_PENALTY
 			if x_reached >= self.goal_x:
@@ -410,7 +563,7 @@ class GeneticAlgorithm:
 				if reached_count >= 2:
 					if i + 1 < self.population_size:
 						fitness[i + 1:] = 0.0
-					break
+						break
 		return fitness
 
 	def _tournament_select(self, fitness: np.ndarray) -> int:
