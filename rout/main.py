@@ -116,15 +116,10 @@ def run(args):
 							if dist == 0:
 								line_start = None
 								continue
-							steps = max(1, int(dist / line_obstacle_spacing))
-							group = []
-							for i in range(steps + 1):
-								t = i / float(steps)
-								px = x1 + dx * t
-								py = y1 + dy * t
-								group.append((px, py, line_obstacle_radius))
-							obstacles.extend(group)
-							obstacles_groups.append(group)
+							# create a single capsule-like obstacle represented as a segment with radius
+							seg = ('seg', x1, y1, x2, y2, line_obstacle_radius)
+							obstacles.append(seg)
+							obstacles_groups.append([seg])
 							# também atualizar o GA para que a simulação use os novos obstáculos
 							try:
 								ga.obstacles = list(obstacles)
@@ -158,11 +153,33 @@ def run(args):
 				continue
 
 			screen.fill((30, 30, 30))
-			# desenhar obstáculos
-			for (ox, oy, orad) in obstacles:
-				s_ox, s_oy = world_to_screen(ox, oy)
-				s_r = max(2, int(orad / (x_max - x_min) * screen_w))
-				pygame.draw.circle(screen, (200, 80, 80), (s_ox, s_oy), s_r)
+			# desenhar obstáculos (suporta círculos e segmentos/cápsulas)
+			for o in obstacles:
+				if isinstance(o, tuple) and len(o) == 3:
+					ox, oy, orad = o
+					s_ox, s_oy = world_to_screen(ox, oy)
+					s_r = max(2, int(orad / (x_max - x_min) * screen_w))
+					pygame.draw.circle(screen, (200, 80, 80), (s_ox, s_oy), s_r)
+				elif isinstance(o, tuple) and len(o) == 6 and o[0] == 'seg':
+					_, ax, ay, bx, by, srad = o
+					s_ax, s_ay = world_to_screen(ax, ay)
+					s_bx, s_by = world_to_screen(bx, by)
+					# thickness in pixels (approx)
+					th = max(2, int((srad / (x_max - x_min)) * screen_w * 2))
+					pygame.draw.line(screen, (200, 80, 80), (s_ax, s_ay), (s_bx, s_by), th)
+					# caps at ends
+					end_r = max(2, int(srad / (x_max - x_min) * screen_w))
+					pygame.draw.circle(screen, (200, 80, 80), (s_ax, s_ay), end_r)
+					pygame.draw.circle(screen, (200, 80, 80), (s_bx, s_by), end_r)
+				else:
+					# fallback: try draw as circle
+					try:
+						ox, oy, orad = o
+						s_ox, s_oy = world_to_screen(ox, oy)
+						s_r = max(2, int(orad / (x_max - x_min) * screen_w))
+						pygame.draw.circle(screen, (200, 80, 80), (s_ox, s_oy), s_r)
+					except Exception:
+						pass
 
 			# se houver uma linha em desenho, desenhá-la (feedback visual)
 			if line_start is not None:
@@ -222,8 +239,6 @@ def parse_args():
 	p.add_argument("--seed", type=int, help="seed aleatória")
 	p.add_argument("--top", type=int, default=3, help="quantos melhores carros desenhar por snapshot")
 	p.add_argument("--show-all", action="store_true", dest="show_all", help="desenhar toda a população em vez dos top-k")
-	# o modo game é obrigatório; não há modo texto/matplotlib
-	# compatibilidade: --game flag removida (apenas modo jogo)
 	p.add_argument("--fps", type=int, default=200, help="frames por segundo na animação do jogo")
 	p.add_argument("--frame-step", dest="frame_step", type=int, default=1, help="amostragem dos pontos de trajetória para animação (1 = todos)")
 	return p.parse_args()
