@@ -95,8 +95,9 @@ def simulate_car(genome: CarGenome,
 				 goal_x: float = 100.0,
 				 obstacles: Optional[List[Tuple[float, float, float]]] = None,
 				 dt: float = 0.1,
-				 max_steps: int = 10000,
-				 env_bounds: Tuple[float, float] = (-25.0, 25.0)) -> Tuple[float, bool, List[Tuple[float, float]]]:
+				 max_steps: int = 1000,
+				 env_bounds: Tuple[float, float] = (-25.0, 25.0),
+				 env_x_bounds: Tuple[float, float] = (-10.0, 110.0)) -> Tuple[float, bool, List[Tuple[float, float]]]:
 	"""
 	Simula o carro começando em (0,0) com orientação 0 (eixo +x). O objetivo
 	fica em (goal_x, 0). Retorna (x_reached, collision_flag, trajectory).
@@ -127,6 +128,22 @@ def simulate_car(genome: CarGenome,
 	span = math.pi / 3.0  # +/- 60 degrees total span
 	sensor_angles = list(np.linspace(-span, span, SENSOR_COUNT))
 
+	# preprocess obstacles into typed lists to avoid isinstance checks every step
+	circles = []  # list of (ox, oy, orad)
+	segs = []     # list of (ax, ay, bx, by, srad)
+	for o in (obstacles or []):
+		if isinstance(o, tuple) and len(o) == 3:
+			circles.append(o)
+		elif isinstance(o, tuple) and len(o) == 6 and o[0] == 'seg':
+			_, ax, ay, bx, by, srad = o
+			segs.append((ax, ay, bx, by, srad))
+		else:
+			try:
+				ox, oy, orad = o
+				circles.append((ox, oy, orad))
+			except Exception:
+				continue
+
 	# loop principal da simulação: cada iteração representa dt segundos
 	for step in range(max_steps):
 		# direção desejada para o objetivo (usada apenas como referência)
@@ -141,7 +158,8 @@ def simulate_car(genome: CarGenome,
 		for sa in sensor_angles:
 			ray_angle = heading + sa
 			min_dist = float('inf')
-			# checar paredes (env_bounds)
+			# checar paredes verticais (y) e horizontais (x) como obstáculos
+			# vertical (top/bottom)
 			if abs(math.sin(ray_angle)) > 1e-8:
 				if math.sin(ray_angle) > 0:
 					dist_to_top = (env_bounds[1] - y) / math.sin(ray_angle)
@@ -151,97 +169,32 @@ def simulate_car(genome: CarGenome,
 					dist_to_bottom = (env_bounds[0] - y) / math.sin(ray_angle)
 					if 0 <= dist_to_bottom < min_dist:
 						min_dist = dist_to_bottom
-
-			# helpers: ray-circle intersection (returns smallest t>=0 or None)
-			def _ray_circle_t(ox, oy, orad):
-				dxr = math.cos(ray_angle)
-				dyr = math.sin(ray_angle)
-				fx = x - ox
-				fy = y - oy
-				a = dxr*dxr + dyr*dyr
-				b = 2*(fx*dxr + fy*dyr)
-				c = fx*fx + fy*fy - (orad + car_radius)**2
-				disc = b*b - 4*a*c
-				if disc < 0:
-					return None
-				t1 = (-b - math.sqrt(disc)) / (2*a)
-				t2 = (-b + math.sqrt(disc)) / (2*a)
-				cands = [t for t in (t1, t2) if t >= 0]
-				if not cands:
-					return None
-				return min(cands)
-
-			# helper: ray-capsule (segment with radius) intersection
-			def _ray_capsule_t(ax, ay, bx, by, seg_rad):
-				# Solve ray (O + t d) vs capsule around segment A->B with radius = seg_rad + car_radius
-				Ox, Oy = x, y
-				dx = math.cos(ray_angle)
-				dy = math.sin(ray_angle)
-				R = seg_rad + car_radius
-				# vector u = B - A
-				u_x = bx - ax
-				u_y = by - ay
-				uu = u_x*u_x + u_y*u_y
-				# check infinite cylinder around line (projected) by solving quadratic
-				# w0 = O - A
-				w0x = Ox - ax
-				w0y = Oy - ay
-				ud = u_x*dx + u_y*dy
-				uw0 = u_x*w0x + u_y*w0y
-				# v = d - u*(ud/uu)
-				if uu == 0:
-					# degenerate segment -> treat as circle at A
-					return _ray_circle_t(ax, ay, seg_rad)
-				v_x = dx - u_x*(ud/uu)
-				v_y = dy - u_y*(ud/uu)
-				q_x = w0x - u_x*(uw0/uu)
-				q_y = w0y - u_y*(uw0/uu)
-				A_q = v_x*v_x + v_y*v_y
-				B_q = 2*(q_x*v_x + q_y*v_y)
-				C_q = q_x*q_x + q_y*q_y - R*R
-				solutions = []
-				if abs(A_q) > 1e-12:
-					discq = B_q*B_q - 4*A_q*C_q
-					if discq >= 0:
-						t1 = (-B_q - math.sqrt(discq)) / (2*A_q)
-						t2 = (-B_q + math.sqrt(discq)) / (2*A_q)
-						for t in (t1, t2):
-							if t >= 0:
-								# compute s = (uw0 + t*ud)/uu
-								s = (uw0 + t*ud) / uu
-								if 0.0 <= s <= 1.0:
-									solutions.append(t)
-				# also check end-circles A and B
-				for (cx, cy) in ((ax, ay), (bx, by)):
-					tc = _ray_circle_t(cx, cy, seg_rad)
-					if tc is not None:
-						solutions.append(tc)
-				if not solutions:
-					return None
-				return min(solutions)
-
-			# checar obstáculos (agora suportamos círculos e segmentos/cápsulas)
-			for o in obstacles:
-				if isinstance(o, tuple) and len(o) == 3:
-					ox, oy, orad = o
-					t = _ray_circle_t(ox, oy, orad)
-					if t is not None and 0 <= t < min_dist:
-						min_dist = t
-				elif isinstance(o, tuple) and len(o) == 6 and o[0] == 'seg':
-					# ('seg', x1,y1,x2,y2, radius)
-					_, ax, ay, bx, by, srad = o
-					t = _ray_capsule_t(ax, ay, bx, by, srad)
-					if t is not None and 0 <= t < min_dist:
-						min_dist = t
+			# horizontal (left/right)
+			if abs(math.cos(ray_angle)) > 1e-8:
+				if math.cos(ray_angle) > 0:
+					dist_to_right = (env_x_bounds[1] - x) / math.cos(ray_angle)
+					if 0 <= dist_to_right < min_dist:
+						min_dist = dist_to_right
 				else:
-					# unknown format - try to interpret as circle fallback
-					try:
-						ox, oy, orad = o
-						t = _ray_circle_t(ox, oy, orad)
-						if t is not None and 0 <= t < min_dist:
-							min_dist = t
-					except Exception:
-						continue
+					dist_to_left = (env_x_bounds[0] - x) / math.cos(ray_angle)
+					if 0 <= dist_to_left < min_dist:
+						min_dist = dist_to_left
+
+			# compute ray direction once
+			dxr = math.cos(ray_angle)
+			dyr = math.sin(ray_angle)
+			Ox = x
+			Oy = y
+			# check circles
+			for (ox, oy, orad) in circles:
+				t = _ray_circle_t(Ox, Oy, dxr, dyr, ox, oy, orad, car_radius)
+				if t is not None and 0.0 <= t < min_dist:
+					min_dist = t
+			# check segments (capsules)
+			for (ax, ay, bx, by, srad) in segs:
+				t = _ray_capsule_t(Ox, Oy, dxr, dyr, ax, ay, bx, by, srad, car_radius)
+				if t is not None and 0.0 <= t < min_dist:
+					min_dist = t
 			sensor_readings.append(min_dist)
 
 		# normalize sensor readings to (0,1] using a monotonic transform
@@ -325,8 +278,10 @@ def simulate_car(genome: CarGenome,
 		if x >= goal_x:
 			return x, False, traj
 
-		# checar limites verticais - colisão com parede
+		# checar limites verticais/horizontais - colisão com parede
 		if y < env_bounds[0] or y > env_bounds[1]:
+			return x, True, traj
+		if x < env_x_bounds[0] or x > env_x_bounds[1]:
 			return x, True, traj
 
 	# se esgotou os passos
@@ -366,6 +321,73 @@ def _point_to_segment_distance(px: float, py: float, x1: float, y1: float, x2: f
 	projx = x1 + t * dx
 	projy = y1 + t * dy
 	return math.hypot(px - projx, py - projy)
+
+
+def _ray_circle_t(Ox: float, Oy: float, dxr: float, dyr: float, cx: float, cy: float, cr: float, car_radius: float):
+	"""Return smallest t>=0 where ray O + t*d hits circle at (cx,cy) with radius cr+car_radius, or None."""
+	fx = Ox - cx
+	fy = Oy - cy
+	a = dxr * dxr + dyr * dyr
+	b = 2.0 * (fx * dxr + fy * dyr)
+	c = fx * fx + fy * fy - (cr + car_radius) ** 2
+	disc = b * b - 4.0 * a * c
+	if disc < 0.0:
+		return None
+	sd = math.sqrt(disc)
+	t1 = (-b - sd) / (2.0 * a)
+	t2 = (-b + sd) / (2.0 * a)
+	cand = None
+	if t1 >= 0.0:
+		cand = t1
+	if t2 >= 0.0:
+		if cand is None or t2 < cand:
+			cand = t2
+	return cand
+
+
+def _ray_capsule_t(Ox: float, Oy: float, dxr: float, dyr: float, ax: float, ay: float, bx: float, by: float, seg_rad: float, car_radius: float):
+	"""Ray vs capsule (segment with radius). Returns smallest t>=0 or None."""
+	# vector along segment
+	u_x = bx - ax
+	u_y = by - ay
+	uu = u_x * u_x + u_y * u_y
+	R = seg_rad + car_radius
+	# project ray onto coordinates avoiding creating many temporaries
+	w0x = Ox - ax
+	w0y = Oy - ay
+	ud = u_x * dxr + u_y * dyr
+	uw0 = u_x * w0x + u_y * w0y
+	if uu == 0.0:
+		return _ray_circle_t(Ox, Oy, dxr, dyr, ax, ay, seg_rad, car_radius)
+	v_x = dxr - u_x * (ud / uu)
+	v_y = dyr - u_y * (ud / uu)
+	q_x = w0x - u_x * (uw0 / uu)
+	q_y = w0y - u_y * (uw0 / uu)
+	A_q = v_x * v_x + v_y * v_y
+	B_q = 2.0 * (q_x * v_x + q_y * v_y)
+	C_q = q_x * q_x + q_y * q_y - R * R
+	solutions = []
+	if abs(A_q) > 1e-12:
+		discq = B_q * B_q - 4.0 * A_q * C_q
+		if discq >= 0.0:
+			sd = math.sqrt(discq)
+			t1 = (-B_q - sd) / (2.0 * A_q)
+			t2 = (-B_q + sd) / (2.0 * A_q)
+			for t in (t1, t2):
+				if t >= 0.0:
+					s = (uw0 + t * ud) / uu
+					if 0.0 <= s <= 1.0:
+						solutions.append(t)
+	# end-circles
+	tc = _ray_circle_t(Ox, Oy, dxr, dyr, ax, ay, seg_rad, car_radius)
+	if tc is not None:
+		solutions.append(tc)
+	tc = _ray_circle_t(Ox, Oy, dxr, dyr, bx, by, seg_rad, car_radius)
+	if tc is not None:
+		solutions.append(tc)
+	if not solutions:
+		return None
+	return min(solutions)
 
 
 def compute_potential_field(obstacles,

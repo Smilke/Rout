@@ -284,7 +284,7 @@ def run(args):
 		max_len = 0
 		for idx in idxs:
 			genome = CarGenome.from_vector(population[idx], NN_WEIGHTS_SIZE)
-			_, _, traj = simulate_car(genome, goal_x=args.goal, obstacles=obstacles, env_bounds=env_y_bounds)
+			_, _, traj = simulate_car(genome, goal_x=args.goal, obstacles=obstacles, env_bounds=env_y_bounds, env_x_bounds=(x_min, x_max))
 			# opcionalmente amostrar o trajeto para reduzir frames
 			if args.frame_step > 1:
 				traj = traj[::args.frame_step]
