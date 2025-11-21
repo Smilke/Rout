@@ -1,7 +1,3 @@
-"""Runner simples para o algoritmo genético de `genetic_algorithm.py`.
-
-Executar este arquivo inicia a otimização e imprime o melhor indivíduo encontrado.
-"""
 import argparse
 from pprint import pprint
 import math

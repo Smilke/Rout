@@ -1,12 +1,13 @@
 """genetic_algorithm.py
 
-Um algoritmo genético simples para evoluir parâmetros de um "carro" que
+Algoritmo genético simples para evoluir parâmetros de um "carro" que
 deve percorrer um percurso 2D até um objetivo. A representação do indivíduo
 é um vetor contínuo com parâmetros físicos do carro (raio da roda, potência,
-massa, arrasto, aderência e resposta de direção).
+massa, arrasto, aderência e resposta de direção) e os pesos de uma pequena
+rede neural que governa as ações do veículo.
 
 Esta implementação é intencionalmente simples e auto-contida para facilitar
-experimentos educacionais.
+experimentos educacionais e estudos sobre algoritmos evolutivos e controle.
 """
 from dataclasses import dataclass
 import math
@@ -15,11 +16,11 @@ import heapq
 
 import numpy as np
 
-# use numpy's Generator for reproducible RNG and better performance
+# usar o Generator do numpy para RNG reproduzível e melhor desempenho
 from numpy.random import default_rng
 
 
-# NN architecture constants (fixed)
+# constantes da arquitetura da rede neural (fixas)
 SENSOR_COUNT = 7
 NN_INPUT = SENSOR_COUNT + 1
 NN_HIDDEN = 6
@@ -31,7 +32,7 @@ NN_WEIGHTS_SIZE = NN_HIDDEN * NN_INPUT + NN_HIDDEN + NN_OUTPUT * NN_HIDDEN + NN_
 class CarGenome:
 	# físicos / sensores
 	wheel_radius: float  # metros
-	motor_power: float   # unidade arbitrária (bigger -> more thrust)
+	motor_power: float   # unidade arbitrária (maior -> mais empuxo)
 	fuel_tank: float     # tamanho do tanque (maior -> mais massa/energia)
 	drag: float          # coeficiente de arrasto (0..2)
 	grip: float          # coeficiente de aderência (0.5..2.0)
@@ -67,15 +68,15 @@ class CarGenome:
 
 # limites para inicialização e mutação (min, max)
 _phys_bounds = np.array([
-	[0.05, 0.5],     # wheel_radius (m)
-	[20.0, 400.0],   # motor_power
-	[5.0, 200.0],    # fuel_tank (arbitrary volume)
-	[0.0, 2.0],      # drag
-	[0.5, 2.0],      # grip
-	[0.0, 1.0],      # steering
+	[0.05, 0.5],     # raio_roda (m)
+	[20.0, 400.0],   # potencia_motor
+	[5.0, 200.0],    # tanque_combustivel (volume arbitrário)
+	[0.0, 2.0],      # arrasto
+	[0.5, 2.0],      # aderencia (grip)
+	[0.0, 1.0],      # responsividade_direcao
 ])
 
-# weight bounds for NN parameters
+# limites dos pesos da rede neural
 _weight_bounds = np.tile(np.array([[-2.0, 2.0]]), (NN_WEIGHTS_SIZE, 1))
 
 GENE_BOUNDS = np.vstack([_phys_bounds, _weight_bounds])
@@ -85,7 +86,11 @@ COLLISION_PENALTY = 5.0
 
 
 def clamp_vector(v: np.ndarray) -> np.ndarray:
-	"""Clamp a vector to the predefined `GENE_BOUNDS` using vectorized numpy ops."""
+	"""Restringe um vetor aos limites definidos em `GENE_BOUNDS`.
+
+	Opera de forma vetorizada com numpy para cortar cada gene ao seu
+	intervalo [min, max] correspondente.
+	"""
 	low = GENE_BOUNDS[:, 0]
 	high = GENE_BOUNDS[:, 1]
 	return np.clip(v, low, high).astype(float)
@@ -124,13 +129,14 @@ def simulate_car(genome: CarGenome,
 	mass = mass_base + motor_mass_coeff * genome.motor_power + fuel_mass_coeff * genome.fuel_tank
 
 	# sensores fixos (em relação ao heading): gerar N sensores com o central em 0
-	# espalha por uma faixa simétrica; um sensor fica exatamente em 0
-	span = math.pi / 3.0  # +/- 60 degrees total span
+	# sensores distribuídos simetricamente em relação ao heading; um sensor central
+	# fica apontando exatamente para frente
+	span = math.pi / 3.0  # cobertura total de +/- 60 graus
 	sensor_angles = list(np.linspace(-span, span, SENSOR_COUNT))
 
-	# preprocess obstacles into typed lists to avoid isinstance checks every step
-	circles = []  # list of (ox, oy, orad)
-	segs = []     # list of (ax, ay, bx, by, srad)
+	# pré-processa obstáculos em listas tipadas para evitar checagens repetidas
+	circles = []  # lista de (ox, oy, orad)
+	segs = []     # lista de (ax, ay, bx, by, srad)
 	for o in (obstacles or []):
 		if isinstance(o, tuple) and len(o) == 3:
 			circles.append(o)
@@ -180,31 +186,31 @@ def simulate_car(genome: CarGenome,
 					if 0 <= dist_to_left < min_dist:
 						min_dist = dist_to_left
 
-			# compute ray direction once
+			# calcula a direção do raio (vetor unitário) apenas uma vez
 			dxr = math.cos(ray_angle)
 			dyr = math.sin(ray_angle)
 			Ox = x
 			Oy = y
-			# check circles
+			# checa interseção com círculos
 			for (ox, oy, orad) in circles:
 				t = _ray_circle_t(Ox, Oy, dxr, dyr, ox, oy, orad, car_radius)
 				if t is not None and 0.0 <= t < min_dist:
 					min_dist = t
-			# check segments (capsules)
+			# checa interseção com segmentos (cápsulas)
 			for (ax, ay, bx, by, srad) in segs:
 				t = _ray_capsule_t(Ox, Oy, dxr, dyr, ax, ay, bx, by, srad, car_radius)
 				if t is not None and 0.0 <= t < min_dist:
 					min_dist = t
 			sensor_readings.append(min_dist)
 
-		# normalize sensor readings to (0,1] using a monotonic transform
-		# sensors are "unlimited"; use 1/(1+dist) so near obstacles -> ~1, far -> ~0
+			# normaliza leituras dos sensores para (0,1], valor maior = obstáculo mais próximo
+		# usa 1/(1+dist) para manter monotonicidade (distância grande -> valor pequeno)
 		sens_norm = 1.0 / (1.0 + np.array(sensor_readings, dtype=float))
 		speed_norm = float(min(1.0, abs(v) / 20.0))
 
-		# use NN to decide actions (genome must carry nn_weights attribute)
+			# usa a rede neural do genoma para decidir ações (se disponível)
 		if not hasattr(genome, 'nn_weights') or len(genome.nn_weights) != NN_WEIGHTS_SIZE:
-			# fallback: acelera reto
+				# comportamento alternativo simples: acelera em linha reta
 			thrust = genome.motor_power
 			accel = (thrust / mass) - genome.drag * (v ** 2)
 			speed_factor = max(0.05, 1.0 - 0.2 * abs(v) / (10.0 * genome.grip))
@@ -214,7 +220,7 @@ def simulate_car(genome: CarGenome,
 			y += v * math.sin(heading) * dt
 			traj.append((x, y))
 		else:
-			# fast forward pass (unpack weights)
+			# passagem direta pela rede neural: desempacota pesos e calcula saída
 			w = genome.nn_weights
 			p = 0
 			W1 = w[p:p + NN_HIDDEN * NN_INPUT].reshape((NN_HIDDEN, NN_INPUT)); p += NN_HIDDEN * NN_INPUT
@@ -226,7 +232,7 @@ def simulate_car(genome: CarGenome,
 			nn_out = 1.0 / (1.0 + np.exp(-(W2.dot(h) + b2)))
 			accel_out, brake_out, steer_left_out, steer_right_out = map(float, nn_out)
 
-			# map outputs to physics
+			# mapeia saídas da RN para parâmetros físicos (aceleração, freio, direção)
 			throttle = accel_out - brake_out
 			thrust = max(0.0, throttle) * genome.motor_power
 			braking = max(0.0, -throttle) + brake_out
@@ -266,7 +272,7 @@ def simulate_car(genome: CarGenome,
 				if dist <= (srad + car_radius):
 					return x, True, traj
 			else:
-				# fallback: try interpret as circle
+				# fallback: tenta interpretar genericamente como círculo
 				try:
 					ox, oy, orad = o
 					if math.hypot(x - ox, y - oy) <= (orad + car_radius):
@@ -323,8 +329,13 @@ def _point_to_segment_distance(px: float, py: float, x1: float, y1: float, x2: f
 	return math.hypot(px - projx, py - projy)
 
 
+
 def _ray_circle_t(Ox: float, Oy: float, dxr: float, dyr: float, cx: float, cy: float, cr: float, car_radius: float):
-	"""Return smallest t>=0 where ray O + t*d hits circle at (cx,cy) with radius cr+car_radius, or None."""
+	"""Retorna o menor t>=0 onde o raio O + t*d colide com o círculo em (cx,cy).
+
+	O círculo tem raio `cr` aumentado pelo `car_radius` do veículo. Retorna
+	`None` se não houver interseção válida.
+	"""
 	fx = Ox - cx
 	fy = Oy - cy
 	a = dxr * dxr + dyr * dyr
@@ -345,8 +356,13 @@ def _ray_circle_t(Ox: float, Oy: float, dxr: float, dyr: float, cx: float, cy: f
 	return cand
 
 
+
 def _ray_capsule_t(Ox: float, Oy: float, dxr: float, dyr: float, ax: float, ay: float, bx: float, by: float, seg_rad: float, car_radius: float):
-	"""Ray vs capsule (segment with radius). Returns smallest t>=0 or None."""
+	"""Raio vs cápsula (segmento com raio): retorna menor t>=0 ou None.
+
+	Considera o segmento com raio `seg_rad` e soma o `car_radius` para a
+	colisão entre cápsulas.
+	"""
 	# vector along segment
 	u_x = bx - ax
 	u_y = by - ay
@@ -378,7 +394,7 @@ def _ray_capsule_t(Ox: float, Oy: float, dxr: float, dyr: float, ax: float, ay: 
 					s = (uw0 + t * ud) / uu
 					if 0.0 <= s <= 1.0:
 						solutions.append(t)
-	# end-circles
+	# checagem das "end-circles" (cantos do segmento)
 	tc = _ray_circle_t(Ox, Oy, dxr, dyr, ax, ay, seg_rad, car_radius)
 	if tc is not None:
 		solutions.append(tc)
@@ -397,11 +413,11 @@ def compute_potential_field(obstacles,
 							y_min: float = -25.0,
 							y_max: float = 25.0,
 							resolution: float = 0.5) -> dict:
-	"""Compute a cost-to-go grid (Dijkstra) propagated from `goal_pos`.
+	"""Computa um campo de custo até o objetivo (Dijkstra) propagado de `goal_pos`.
 
-	Returns a dict with keys: 'grid' (2D numpy array shape (nx, ny)), 'origin' (x_min,y_min),
-	'res' (resolution) and 'shape' (nx, ny).
-	Obstacles support circle tuples (x,y,r) and segment tuples ('seg', x1,y1,x2,y2,r).
+	Retorna um dicionário com chaves: 'grid' (array 2D com forma (nx, ny)),
+	'origin' (x_min, y_min), 'res' (resolução) e 'shape' (nx, ny).
+	Obstáculos suportados: tuplas de círculo (x,y,r) e segmentos ('seg', x1,y1,x2,y2,r).
 	"""
 	xs = np.arange(x_min + resolution / 2.0, x_max, resolution)
 	ys = np.arange(y_min + resolution / 2.0, y_max, resolution)
@@ -410,7 +426,7 @@ def compute_potential_field(obstacles,
 	if nx <= 0 or ny <= 0:
 		return {'grid': np.full((0, 0), float('inf')), 'origin': (x_min, y_min), 'res': resolution, 'shape': (nx, ny)}
 
-	# create grid of cell centers with indexing 'ij' so grid[i,j] corresponds to xs[i], ys[j]
+	# cria uma grade de centros de célula com indexação 'ij' (grid[i,j] -> xs[i], ys[j])
 	XX, YY = np.meshgrid(xs, ys, indexing='ij')
 	blocked = np.zeros((nx, ny), dtype=bool)
 
@@ -445,7 +461,7 @@ def compute_potential_field(obstacles,
 	pot = np.full((nx, ny), INF, dtype=float)
 
 	gx, gy = goal_pos
-	# map goal to nearest cell indices
+	# mapeia a posição do objetivo para o índice da célula mais próxima
 	ix = int(round((gx - (x_min + resolution / 2.0)) / resolution))
 	iy = int(round((gy - (y_min + resolution / 2.0)) / resolution))
 	if ix < 0 or ix >= nx or iy < 0 or iy >= ny or blocked[ix, iy]:
@@ -526,14 +542,14 @@ class GeneticAlgorithm:
 		self.goal_x = float(goal_x)
 		self.obstacles = list(obstacles) if obstacles is not None else []
 
-		# random generator
+		# gerador aleatório (reprodutível usando `seed`)
 		self.rng = default_rng(seed)
 
-		# population stored as numpy arrays
+		# população armazenada como arrays numpy
 		self.pop = self._init_population()
 
-		# precompute potential field to evaluate curved paths better
-		# bounds chosen to match typical world used by main.py; resolution configurable
+		# pré-computa um campo de potencial para avaliar trajetórias curvas
+		# limites escolhidos para combinar com o mundo usado em main.py; resolução configurável
 		try:
 			self.potential_field = compute_potential_field(self.obstacles,
 									(goal_x if False else (self.goal_x, 0.0)),
@@ -548,7 +564,7 @@ class GeneticAlgorithm:
 	def _init_population(self) -> np.ndarray:
 		low = GENE_BOUNDS[:, 0]
 		high = GENE_BOUNDS[:, 1]
-		# sample uniformly per-gene using broadcasting
+		# amostra uniformemente por gene usando broadcasting
 		samples = self.rng.random((self.population_size, low.size))
 		return (low + samples * (high - low)).astype(float)
 
@@ -567,7 +583,7 @@ class GeneticAlgorithm:
 			x_reached, collision, traj = simulate_car(genome, goal_x=self.goal_x, obstacles=self.obstacles)
 			steps = max(0, len(traj) - 1)
 			time_cost = 0.02
-			# if a potential field is available, use it (lower cost == better)
+			# se um campo de potencial estiver disponível, usa-o (custo menor = melhor)
 			if getattr(self, 'potential_field', None) is not None:
 				final_x, final_y = traj[-1]
 				pot = sample_potential(self.potential_field, final_x, final_y)
@@ -589,7 +605,7 @@ class GeneticAlgorithm:
 		return fitness
 
 	def _tournament_select(self, fitness: np.ndarray) -> int:
-		# retorna índice de indivíduo selecionado (using RNG)
+		# retorna índice do indivíduo selecionado (usando RNG interno)
 		contestants = self.rng.integers(0, self.population_size, size=self.tournament_size)
 		best = int(contestants[0])
 		for c in contestants:
@@ -606,7 +622,7 @@ class GeneticAlgorithm:
 		return child1, child2
 
 	def _mutate(self, individual: np.ndarray) -> np.ndarray:
-		# gaussian perturbation where a mask indicates mutated genes
+		# perturbação gaussiana; uma máscara indica quais genes serão mutados
 		mask = self.rng.random(individual.shape) < self.mutation_rate
 		if mask.any():
 			lows = GENE_BOUNDS[:, 0]
@@ -628,7 +644,7 @@ class GeneticAlgorithm:
 				except Exception:
 					pass
 
-			# keep best
+			# atualiza o melhor indivíduo encontrado
 			idx_best = int(np.argmax(fitness))
 			if fitness[idx_best] > best_fitness:
 				best_fitness = float(fitness[idx_best])
@@ -637,7 +653,7 @@ class GeneticAlgorithm:
 			if verbose and (gen % max(1, int(generations) // 10) == 0 or gen == int(generations) - 1):
 				print(f"Generation {gen:4d}: best fitness = {best_fitness:.3f}")
 
-			# create new population
+			# gera nova população por seleção, crossover e mutação
 			new_pop = np.empty_like(self.pop)
 			i = 0
 			while i < self.population_size:

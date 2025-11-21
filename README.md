@@ -23,3 +23,10 @@ Controles durante a animação:
 - ESC ou fechar a janela: sair
 
 Use `--frame-step` para reduzir número de frames (ex.: --frame-step 2 pula metade dos pontos da trajetória).
+use `--pop` para decidir a poplação de carros.
+use `--gens` para decidir o numero de gerações.
+use `--mut` para decidir a taxa de mutação aleatoria.
+use `--seed` para decidir a semente de geração a população inicial.
+use `--top` para decidir quantos carros serão renderizados.
+use `--show-all` para mostrar toda a população.
+use `--fps` para decidir velocidade da renderização.
