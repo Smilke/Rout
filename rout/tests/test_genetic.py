@@ -3,6 +3,9 @@ import sys
 import os
 import pytest
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+
+
+
 from rout.genetic_algorithm import (
     CarGenome,
     GeneticAlgorithm,
@@ -282,3 +285,38 @@ def test_fitness_time_and_collision_penalty(mocker):
     result_fitness = fitness_of(CarGenome.from_vector(np.zeros(GENE_BOUNDS.shape[0]), NN_WEIGHTS_SIZE), goal_x)
     
     assert np.isclose(result_fitness, expected_fitness)
+
+
+def test_simulate_car_with_neural_network(dummy_genome):
+    """
+    Testa o caminho 'else' dentro de simulate_car, onde a Rede Neural 
+    decide a aceleração e direção, em vez da lógica fixa.
+    """
+    # Preenche os pesos com valores aleatórios (mas determinísticos para o teste)
+    rng = np.random.default_rng(42)
+    dummy_genome.nn_weights = rng.standard_normal(NN_WEIGHTS_SIZE)
+    
+    # Roda apenas 1 passo para verificar se não quebra e se atualiza o estado
+    x_start, y_start = 0.0, 0.0
+    x_end, collision, traj = simulate_car(dummy_genome, goal_x=10.0, max_steps=1)
+    
+    # Se a rede neural funcionou, o carro deve ter se movido (ou tentado)
+    # e a trajetória deve ter tamanho 2 (início + 1 passo)
+    assert len(traj) == 2
+    assert not collision
+
+
+def test_ga_run_full_loop_with_callback():
+    """Roda o GA por poucas gerações para garantir que o loop principal não trava."""
+    ga = GeneticAlgorithm(population_size=4, goal_x=10.0)
+    
+    mock_callback_data = {'called': False}
+    def on_gen(gen, pop, fit):
+        mock_callback_data['called'] = True
+        mock_callback_data['last_gen'] = gen
+
+    best, fit = ga.run(generations=2, verbose=False, on_generation=on_gen)
+    
+    assert best is not None
+    assert mock_callback_data['called'] is True
+    assert mock_callback_data['last_gen'] == 1 # 0 e 1 (2 gerações)
