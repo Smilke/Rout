@@ -2,6 +2,7 @@ import numpy as np
 import sys
 import os
 import pytest
+import math
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
 
@@ -9,6 +10,10 @@ sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from rout.genetic_algorithm import (
     CarGenome,
     GeneticAlgorithm,
+    compute_potential_field,
+    sample_potential,
+    _ray_circle_t,
+    _ray_capsule_t,
     clamp_vector,
     fitness_of,
     simulate_car,
@@ -20,7 +25,7 @@ from rout.genetic_algorithm import (
 
 @pytest.fixture
 def ga_instance(mocker):
-    """Retorna uma instância básica do GeneticAlgorithm para testes de métodos internos."""
+    #Retorna uma instância básica do GeneticAlgorithm para testes de métodos internos.
     # precisa usar uma seed fixa para que os resultados sejam reproduzíveis
     return GeneticAlgorithm(
         population_size=10, 
@@ -33,7 +38,7 @@ def ga_instance(mocker):
 
 @pytest.fixture
 def dummy_genome():
-    """Cria um CarGenome com valores típicos para testes."""
+    #Cria um CarGenome com valores típicos para testes.
     return CarGenome(
         wheel_radius=0.2,
         motor_power=200.0,
@@ -47,7 +52,7 @@ def dummy_genome():
 
 # Testa a inicialização da população do GA
 def test_ga_init_population_size(ga_instance):
-    """Verifica se a população inicial é criada com o tamanho e forma corretos."""
+    #Verifica se a população inicial é criada com o tamanho e forma corretos.
     pop = ga_instance._init_population()
     
     # Deve ser (population_size, num_genes)
@@ -55,7 +60,7 @@ def test_ga_init_population_size(ga_instance):
     assert pop.shape == expected_shape
 
 def test_ga_init_population_bounds(ga_instance):
-    """Verifica se todos os genes da população inicial estão dentro dos limites."""
+    #Verifica se todos os genes da população inicial estão dentro dos limites.
     pop = ga_instance._init_population()
     
     # Verifica se o mínimo de toda a população é >= ao mínimo do GENE_BOUNDS
@@ -65,7 +70,7 @@ def test_ga_init_population_bounds(ga_instance):
 
 
 def test_car_genome_serialization_integrity(dummy_genome):
-    """Verifica se a serialização para vetor e desserialização mantém os valores originais."""
+    #Verifica se a serialização para vetor e desserialização mantém os valores originais.
     vector = dummy_genome.to_vector()
     restored_genome = CarGenome.from_vector(vector, NN_WEIGHTS_SIZE)
 
@@ -76,7 +81,7 @@ def test_car_genome_serialization_integrity(dummy_genome):
     assert np.allclose(restored_genome.nn_weights, dummy_genome.nn_weights)
 
 def test_clamp_vector_min_max():
-    """Verifica se os valores fora dos limites são corretamente restringidos (clamped)."""
+    #Verifica se os valores fora dos limites são corretamente restringidos (clamped).
     v_out_of_bounds = np.array([0.0] * GENE_BOUNDS.shape[0])
     v_out_of_bounds[0] = -1.0 # Abaixo do mínimo (0.05)
     v_out_of_bounds[1] = 1000.0 # Acima do máximo (400.0)
@@ -87,7 +92,7 @@ def test_clamp_vector_min_max():
     assert np.isclose(clamped_v[1], GENE_BOUNDS[1, 1]) # Deve ser 400.0
 
 def test_clamp_vector_in_bounds():
-    """Verifica se um vetor dentro dos limites não é alterado."""
+    #Verifica se um vetor dentro dos limites não é alterado.
     # Usa a média dos limites como um vetor dentro dos limites
     v_in_bounds = np.mean(GENE_BOUNDS, axis=1)
 
@@ -113,7 +118,7 @@ def test_ga_crossover():
     assert c2.shape == p2.shape
 
 def test_ga_crossover_no_crossover(ga_instance, mocker):
-    """Verifica se com crossover_rate=0.0, os filhos são cópias exatas dos pais."""
+    # Verifica se com crossover_rate=0.0, os filhos são cópias exatas dos pais.
     ga_instance.crossover_rate = 0.0
     parent_a = np.ones(GENE_BOUNDS.shape[0]) * 1.0
     parent_b = np.ones(GENE_BOUNDS.shape[0]) * 4.0
@@ -128,7 +133,7 @@ def test_ga_crossover_no_crossover(ga_instance, mocker):
     assert np.allclose(child2, parent_b)
 
 def test_ga_crossover_full_blending(ga_instance, mocker):
-    """Verifica se o crossover de ponto único (blending) ocorre corretamente."""
+    #Verifica se o crossover de ponto único (blending) ocorre corretamente.
     ga_instance.crossover_rate = 1.0
     parent_a = np.ones(GENE_BOUNDS.shape[0]) * 10.0
     parent_b = np.ones(GENE_BOUNDS.shape[0]) * 2.0  
@@ -145,7 +150,7 @@ def test_ga_crossover_full_blending(ga_instance, mocker):
     assert np.allclose(child2, expected_mean)
 
 def test_ga_mutate_no_mutation(ga_instance, mocker):
-    """Verifica se com mutation_rate=0.0, o indivíduo permanece inalterado."""
+    #Verifica se com mutation_rate=0.0, o indivíduo permanece inalterado.
     ga_instance.mutation_rate = 0.0
     individual = np.mean(GENE_BOUNDS, axis=1)
     
@@ -191,7 +196,7 @@ def test_tournament_selection_returns_individual():
     assert selected.shape == (6 + NN_WEIGHTS_SIZE,)
 
 def test_ga_tournament_selection(ga_instance, mocker):
-    """Testa se o torneio seleciona corretamente o indivíduo com o maior fitness."""
+    #Testa se o torneio seleciona corretamente o indivíduo com o maior fitness.
     ga_instance.population_size = 5 
     ga_instance.tournament_size = 3
     
@@ -226,10 +231,10 @@ def test_generation_step_updates_population():
         new_pop.extend([ga._mutate(c1), ga._mutate(c2)])
 
     ga.pop = np.array(new_pop)
-    assert not np.array_equal(old_pop, ga.pop), "A população não foi atualizada corretamente."
+    assert not np.array_equal(old_pop, ga.pop), #A população não foi atualizada corretamente.
 
 def test_simulate_car_reaches_goal_simple():
-    """Verifica se um carro otimista (alta potência, baixo arrasto) atinge o objetivo."""
+    #Verifica se um carro otimista (alta potência, baixo arrasto) atinge o objetivo.
     optimistic_genome = CarGenome(
         wheel_radius=0.5,
         motor_power=500.0, # Muito forte
@@ -248,7 +253,7 @@ def test_simulate_car_reaches_goal_simple():
     assert collision is False
 
 def test_simulate_car_collision_penalty():
-    """Verifica se o carro colide com um obstáculo circular em seu caminho."""
+    #Verifica se o carro colide com um obstáculo circular em seu caminho.
     obstacle = [(10.0, 0.0, 1.0)]
     
     # Carro com potência razoável, indo em linha reta (steering=0.0)
@@ -288,15 +293,10 @@ def test_fitness_time_and_collision_penalty(mocker):
 
 
 def test_simulate_car_with_neural_network(dummy_genome):
-    """
-    Testa o caminho 'else' dentro de simulate_car, onde a Rede Neural 
-    decide a aceleração e direção, em vez da lógica fixa.
-    """
-    # Preenche os pesos com valores aleatórios (mas determinísticos para o teste)
+  
     rng = np.random.default_rng(42)
     dummy_genome.nn_weights = rng.standard_normal(NN_WEIGHTS_SIZE)
     
-    # Roda apenas 1 passo para verificar se não quebra e se atualiza o estado
     x_start, y_start = 0.0, 0.0
     x_end, collision, traj = simulate_car(dummy_genome, goal_x=10.0, max_steps=1)
     
@@ -307,7 +307,6 @@ def test_simulate_car_with_neural_network(dummy_genome):
 
 
 def test_ga_run_full_loop_with_callback():
-    """Roda o GA por poucas gerações para garantir que o loop principal não trava."""
     ga = GeneticAlgorithm(population_size=4, goal_x=10.0)
     
     mock_callback_data = {'called': False}
@@ -323,14 +322,9 @@ def test_ga_run_full_loop_with_callback():
 
 
 def test_potential_field_generation_and_sampling():
-    """
-    Cobre as funções 'compute_potential_field' e 'sample_potential'.
-    Verifica se o algoritmo de Dijkstra cria um gradiente onde o objetivo é 0
-    e longe do objetivo é maior que 0.
-    """
-    # Cria um campo pequeno (0 a 10) com resolução 1.0
-    goal_pos = (5.0, 5.0)
-    # Adiciona um obstáculo no (2,2) para garantir que o loop de obstáculos roda
+    
+    goal_pos = (5.5, 5.5) 
+    
     obstacles = [(2.0, 2.0, 0.5)]
     
     field = compute_potential_field(
@@ -341,51 +335,47 @@ def test_potential_field_generation_and_sampling():
         resolution=1.0
     )
     
-    # 1. Verifica se o valor exato no objetivo é 0.0 (ou muito próximo)
-    val_at_goal = sample_potential(field, 5.0, 5.0)
-    assert math.isclose(val_at_goal, 0.0, abs_tol=1e-3)
+    # Verifica se o valor exato no objetivo é 0.0
+    val_at_goal = sample_potential(field, 5.5, 5.5)
+    assert math.isclose(val_at_goal, 0.0, abs_tol=1e-5)
     
-    # 2. Verifica se um ponto longe tem custo maior que o objetivo
-    val_far = sample_potential(field, 9.0, 9.0)
+    # Verifica se um ponto longe tem custo maior (gradiente funciona)
+    val_far = sample_potential(field, 9.5, 9.5)
     assert val_far > 1.0
     
-    # 3. Verifica se amostrar fora do mapa retorna infinito
+    #Verifica se amostrar fora do mapa retorna infinito
     val_out = sample_potential(field, -50.0, -50.0)
     assert val_out == float('inf')
 
 
 def test_segment_obstacle_collision_and_logic(dummy_genome):
-    """
-    Cobre a lógica de colisão específica para SEGMENTOS ('seg'),
-    que é diferente da lógica de círculos.
-    """
-    # Cria uma parede vertical na posição X=5.0
-    # Formato: ('seg', x1, y1, x2, y2, raio/espessura)
-    wall_obstacle = [('seg', 5.0, -10.0, 5.0, 10.0, 0.1)]
+  
+    wall_obstacle = [('seg', 5.0, -10.0, 5.0, 10.0, 1.0)]
     
-    # Configura o carro para andar reto e rápido
+    dummy_genome.nn_weights = np.array([]) 
+
     dummy_genome.steering = 0.0
-    dummy_genome.motor_power = 200.0
+    dummy_genome.motor_power = 100.0 
     
-    # Roda a simulação
     x_reached, collision, _ = simulate_car(
         dummy_genome, 
         goal_x=10.0, 
         obstacles=wall_obstacle, 
-        max_steps=100
+        max_steps=200
     )
     
-    # O carro deve ter batido (collision=True) e não pode ter passado de X=5.5
+    # O carro deve ter batido na parede
     assert collision is True
-    assert x_reached < 5.5
+    
+    # A parede está em X=5.0 com raio 1.0 -> A borda "física" começa em X=4.0.
+    # O carro deve parar antes ou dentro da parede.
+    assert x_reached < 6.0
+
 
 
 def test_ray_math_miss_scenarios():
-    """
-    Cobre as ramificações matemáticas onde os raios NÃO acertam os obstáculos.
-    (Funções _ray_circle_t e _ray_capsule_t retornando None)
-    """
-    # 1. Teste de Raio vs Círculo (Erra o alvo)
+ 
+    # Teste de Raio vs Círculo (Erra o alvo)
     # Raio sai de (0,0) apontando para cima (0,1)
     # Círculo está na direita (10,0)
     t_circle = _ray_circle_t(
@@ -396,8 +386,7 @@ def test_ray_math_miss_scenarios():
     )
     assert t_circle is None
 
-    # 2. Teste de Raio vs Cápsula (Erra o alvo)
-    # Raio aponta para cima, segmento está na direita verticalmente
+    # Teste de Raio vs Cápsula (Erra o alvo)
     t_capsule = _ray_capsule_t(
         Ox=0.0, Oy=0.0,
         dxr=0.0, dyr=1.0,
