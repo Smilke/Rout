@@ -320,3 +320,88 @@ def test_ga_run_full_loop_with_callback():
     assert best is not None
     assert mock_callback_data['called'] is True
     assert mock_callback_data['last_gen'] == 1 # 0 e 1 (2 gerações)
+
+
+def test_potential_field_generation_and_sampling():
+    """
+    Cobre as funções 'compute_potential_field' e 'sample_potential'.
+    Verifica se o algoritmo de Dijkstra cria um gradiente onde o objetivo é 0
+    e longe do objetivo é maior que 0.
+    """
+    # Cria um campo pequeno (0 a 10) com resolução 1.0
+    goal_pos = (5.0, 5.0)
+    # Adiciona um obstáculo no (2,2) para garantir que o loop de obstáculos roda
+    obstacles = [(2.0, 2.0, 0.5)]
+    
+    field = compute_potential_field(
+        obstacles=obstacles,
+        goal_pos=goal_pos,
+        x_min=0, x_max=10,
+        y_min=0, y_max=10,
+        resolution=1.0
+    )
+    
+    # 1. Verifica se o valor exato no objetivo é 0.0 (ou muito próximo)
+    val_at_goal = sample_potential(field, 5.0, 5.0)
+    assert math.isclose(val_at_goal, 0.0, abs_tol=1e-3)
+    
+    # 2. Verifica se um ponto longe tem custo maior que o objetivo
+    val_far = sample_potential(field, 9.0, 9.0)
+    assert val_far > 1.0
+    
+    # 3. Verifica se amostrar fora do mapa retorna infinito
+    val_out = sample_potential(field, -50.0, -50.0)
+    assert val_out == float('inf')
+
+
+def test_segment_obstacle_collision_and_logic(dummy_genome):
+    """
+    Cobre a lógica de colisão específica para SEGMENTOS ('seg'),
+    que é diferente da lógica de círculos.
+    """
+    # Cria uma parede vertical na posição X=5.0
+    # Formato: ('seg', x1, y1, x2, y2, raio/espessura)
+    wall_obstacle = [('seg', 5.0, -10.0, 5.0, 10.0, 0.1)]
+    
+    # Configura o carro para andar reto e rápido
+    dummy_genome.steering = 0.0
+    dummy_genome.motor_power = 200.0
+    
+    # Roda a simulação
+    x_reached, collision, _ = simulate_car(
+        dummy_genome, 
+        goal_x=10.0, 
+        obstacles=wall_obstacle, 
+        max_steps=100
+    )
+    
+    # O carro deve ter batido (collision=True) e não pode ter passado de X=5.5
+    assert collision is True
+    assert x_reached < 5.5
+
+
+def test_ray_math_miss_scenarios():
+    """
+    Cobre as ramificações matemáticas onde os raios NÃO acertam os obstáculos.
+    (Funções _ray_circle_t e _ray_capsule_t retornando None)
+    """
+    # 1. Teste de Raio vs Círculo (Erra o alvo)
+    # Raio sai de (0,0) apontando para cima (0,1)
+    # Círculo está na direita (10,0)
+    t_circle = _ray_circle_t(
+        Ox=0.0, Oy=0.0, 
+        dxr=0.0, dyr=1.0,  # Aponta para Y
+        cx=10.0, cy=0.0, cr=1.0, 
+        car_radius=0.0
+    )
+    assert t_circle is None
+
+    # 2. Teste de Raio vs Cápsula (Erra o alvo)
+    # Raio aponta para cima, segmento está na direita verticalmente
+    t_capsule = _ray_capsule_t(
+        Ox=0.0, Oy=0.0,
+        dxr=0.0, dyr=1.0,
+        ax=10.0, ay=-5.0, bx=10.0, by=5.0,
+        seg_rad=0.5, car_radius=0.0
+    )
+    assert t_capsule is None
